@@ -1,96 +1,64 @@
-import tensorflow as tf
-import tensorflow_datasets as tfds
+
 import numpy as np
 import matplotlib.pyplot as plt
-
-from tensorflow.keras.applications import VGG16
-from tensorflow.keras.applications.vgg16 import preprocess_input
+from tensorflow.keras.applications import ResNet50
+from tensorflow.keras.applications.resnet50 import preprocess_input
+from tensorflow.keras.preprocessing.image import load_img, img_to_array
 from tensorflow.keras.models import Model
 
-# 1. Load ImageNet-derived dataset automatically
-ds = tfds.load(
-    "imagenette/160px-v2",
-    split="train",
-    as_supervised=True
-)
+# 1. Load and preprocess image
+image_path = "cat.jpg"
+image = load_img(image_path, target_size=(224, 224))
+x = img_to_array(image)
+img = preprocess_input(np.expand_dims(x, axis=0))
 
-# 2. Get one image
-img, label = next(iter(ds))
+# 2. Load pre-trained CNN
+model = ResNet50(weights="imagenet")
 
-# 3. Resize and preprocess
-img = tf.image.resize(img, (224, 224))
-x = np.expand_dims(img.numpy(), 0)
-x = preprocess_input(x)
-
-# 4. Load pretrained VGG16
-model = VGG16(weights="imagenet")
-
-# 5. Select 3 convolutional layers
-layers = [
-    "block1_conv1",
-    "block3_conv1",
-    "block5_conv1"
-]
+# 3. Select early, middle and deep layers
+layers = ["conv1_relu", "conv2_block3_out", "conv4_block6_out"]
 
 feature_model = Model(
-    model.input,
-    [model.get_layer(l).output for l in layers]
+    inputs=model.input,
+    outputs=[model.get_layer(n).output for n in layers]
 )
 
-features = feature_model.predict(x, verbose=0)
+# 4. Extract feature maps
+features = feature_model.predict(img, verbose=0)
 
-# 6. Display feature maps
-for name, feature in zip(layers, features):
+# 5. Display original image and feature maps
+plt.figure(figsize=(12, 8))
+plt.subplot(4, 6, 1)
+plt.imshow(image)
+plt.title("Input Image")
+plt.axis("off")
 
-    print(name, ":", feature.shape)
+for i, (name, fmap) in enumerate(zip(layers, features)):
+    print(name, ":", fmap.shape)
 
-    plt.imshow(feature[0, :, :, 0], cmap="gray")
-    plt.title(name + " Feature Map")
+    for j in range(6):
+        plt.subplot(4, 6, (i + 1) * 6 + j + 1)
+        plt.imshow(fmap[0, :, :, j], cmap="viridis")
+        plt.axis("off")
+
+    plt.subplot(4, 6, (i + 1) * 6 + 1)
+    plt.text(0, 0.5, name, fontsize=9)
     plt.axis("off")
-    plt.show()
 
-# 7. Display learned filters
-filters = model.get_layer("block1_conv1").get_weights()[0]
+plt.tight_layout()
+plt.show()
 
-print("Filter shape:", filters.shape)
+# 6. Visualize learned filters of the first convolution
+filters, bias = model.get_layer("conv1_conv").get_weights()
 
-for i in range(6):
-    plt.imshow(filters[:, :, 0, i], cmap="gray")
-    plt.title("Filter " + str(i))
+plt.figure(figsize=(8, 8))
+for i in range(16):
+    f = filters[:, :, :, i]
+    f = (f - f.min()) / (f.max() - f.min() + 1e-8)
+
+    plt.subplot(4, 4, i + 1)
+    plt.imshow(f)
     plt.axis("off")
-    plt.show()
-# import numpy as np
-# import matplotlib.pyplot as plt
-# from tensorflow.keras.applications import VGG16
-# from tensorflow.keras.applications.vgg16 import preprocess_input
-# from tensorflow.keras.preprocessing import image
-# from tensorflow.keras.models import Model
 
-# model = VGG16(weights="imagenet")
-
-# img = image.load_img("cat.jpg", target_size=(224,224))
-# x = np.expand_dims(image.img_to_array(img), 0)
-# x = preprocess_input(x)
-
-# layers = ["block1_conv1", "block3_conv1", "block5_conv1"]
-
-# fm = Model(model.input,
-#            [model.get_layer(l).output for l in layers])
-
-# features = fm.predict(x, verbose=0)
-
-# for l, f in zip(layers, features):
-#     print(l, ":", f.shape)
-#     plt.imshow(f[0,:,:,0], cmap="gray")
-#     plt.title(l)
-#     plt.axis("off")
-#     plt.show()
-
-# filters = model.get_layer("block1_conv1").get_weights()[0]
-# print("Filter shape:", filters.shape)
-
-# for i in range(6):
-#     plt.imshow(filters[:,:,0,i], cmap="gray")
-#     plt.title("Filter " + str(i+1))
-#     plt.axis("off")
-#     plt.show()
+plt.suptitle("First Convolution Layer Filters")
+plt.show()

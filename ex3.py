@@ -1,152 +1,60 @@
-import tensorflow as tf
-import tensorflow_datasets as tfds
+
 import numpy as np
-
-from tensorflow.keras.applications import VGG16
-from tensorflow.keras.applications.vgg16 import preprocess_input
+import tensorflow as tf
+import matplotlib.pyplot as plt
+from tensorflow.keras.applications import ResNet50
+from tensorflow.keras.applications.resnet50 import preprocess_input
+from tensorflow.keras.layers import GlobalAveragePooling2D
 from tensorflow.keras.models import Model
-from tensorflow.keras.layers import GlobalAveragePooling2D, Dense
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import confusion_matrix, classification_report
 
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
-
-# 1. Load dataset
-ds = tfds.load(
-    "imagenette/160px-v2",
-    split="train",
-    as_supervised=True
+# 1. Load dataset and split
+path = "imagenet_subset"
+train_ds, test_ds = tf.keras.utils.image_dataset_from_directory(
+    path, validation_split=0.2, subset="both", seed=1,
+    image_size=(224, 224), batch_size=8
 )
 
-# 2. Collect 50 images from each of first 5 classes
-images = []
-labels = []
-count = [0] * 5
+# 2. Load pre-trained CNN without its classifier
+base = ResNet50(weights="imagenet", include_top=False,
+                input_shape=(224, 224, 3))
 
-for img, label in tfds.as_numpy(ds):
-    label = int(label)
+# 3. Extract feature vectors using Global Average Pooling
+model = Model(base.input, GlobalAveragePooling2D()(base.output))
 
-    if label < 5 and count[label] < 50:
-        img = tf.image.resize(img, (224, 224)).numpy()
-        images.append(img)
-        labels.append(label)
-        count[label] += 1
+def extract(ds):
+    X, y = [], []
+    for images, labels in ds:
+        f = model.predict(preprocess_input(images.numpy()), verbose=0)
+        X.extend(f)
+        y.extend(labels.numpy())
+    return np.array(X), np.array(y)
 
-    if all(c == 50 for c in count):
-        break
+X_train, y_train = extract(train_ds)
+X_test, y_test = extract(test_ds)
 
-X = preprocess_input(np.array(images))
-y = np.array(labels)
+print("Feature vector shape:", X_train.shape)
 
-print("Dataset:", X.shape)
-print("Labels:", y.shape)
+# 4. Train a new classifier
+clf = LogisticRegression(max_iter=500)
+clf.fit(X_train, y_train)
 
-# 3. Load pretrained VGG16 without final classifier
-cnn = VGG16(weights="imagenet", include_top=False)
+# 5. Predict unseen images
+pred = clf.predict(X_test)
 
-# 4. Feature extractor
-extractor = Model(
-    cnn.input,
-    GlobalAveragePooling2D()(cnn.output)
-)
+# 6. Evaluate
+print("Accuracy:", clf.score(X_test, y_test))
+print("Confusion Matrix:\n", confusion_matrix(y_test, pred))
+print(classification_report(
+    y_test, pred, target_names=train_ds.class_names,
+    zero_division=0
+))
 
-X_features = extractor.predict(X, verbose=0)
+# 7. Display a sample image
+for images, labels in test_ds.take(1):
+    plt.imshow(images[0].numpy().astype("uint8"))
+    plt.title(train_ds.class_names[int(labels[0])])
+    plt.axis("off")
+    plt.show()
 
-print("Feature vector shape:", X_features.shape)
-
-# 5. Train/test split
-X_train, X_test, y_train, y_test = train_test_split(
-    X_features,
-    y,
-    test_size=0.2,
-    random_state=42,
-    stratify=y
-)
-
-# 6. New classification layer
-classifier = tf.keras.Sequential([
-    Dense(5, activation="softmax")
-])
-
-classifier.compile(
-    optimizer="adam",
-    loss="sparse_categorical_crossentropy",
-    metrics=["accuracy"]
-)
-
-# 7. Train
-classifier.fit(
-    X_train,
-    y_train,
-    epochs=10,
-    verbose=1
-)
-
-# 8. Test
-pred = np.argmax(
-    classifier.predict(X_test, verbose=0),
-    axis=1
-)
-
-print("\nAccuracy:", accuracy_score(y_test, pred))
-
-print("\nClassification Report:")
-print(classification_report(y_test, pred))
-
-print("\nConfusion Matrix:")
-print(confusion_matrix(y_test, pred))
-# import numpy as np
-# import tensorflow as tf
-# from tensorflow.keras.preprocessing.image import ImageDataGenerator
-# from tensorflow.keras.applications import VGG16
-# from tensorflow.keras.applications.vgg16 import preprocess_input
-# from tensorflow.keras.models import Model
-# from tensorflow.keras.layers import GlobalAveragePooling2D, Dense
-# from sklearn.model_selection import train_test_split
-# from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
-
-# path = "imagenet_subset"
-
-# data = ImageDataGenerator(
-#     preprocessing_function=preprocess_input
-# ).flow_from_directory(
-#     path, target_size=(224,224), batch_size=10,
-#     class_mode="sparse", shuffle=False
-# )
-
-# cnn = VGG16(weights="imagenet")
-
-# extractor = Model(
-#     cnn.input,
-#     GlobalAveragePooling2D()(cnn.get_layer("block5_pool").output)
-# )
-
-# X = extractor.predict(data, verbose=0)
-# y = data.classes
-
-# np.save("features.npy", X)
-# np.save("labels.npy", y)
-
-# print("Feature vector:", X.shape)
-
-# Xtr, Xte, ytr, yte = train_test_split(
-#     X, y, test_size=0.2, random_state=42, stratify=y
-# )
-
-# clf = tf.keras.Sequential([
-#     Dense(len(data.class_indices), activation="softmax")
-# ])
-
-# clf.compile(
-#     optimizer="adam",
-#     loss="sparse_categorical_crossentropy",
-#     metrics=["accuracy"]
-# )
-
-# clf.fit(Xtr, ytr, epochs=20, verbose=0)
-
-# p = np.argmax(clf.predict(Xte, verbose=0), axis=1)
-
-# print("Accuracy:", accuracy_score(yte, p))
-# print(classification_report(yte, p))
-# print("Confusion Matrix:")
-# print(confusion_matrix(yte, p))

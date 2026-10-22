@@ -1,219 +1,110 @@
-import tensorflow as tf
-import tensorflow_datasets as tfds
-import numpy as np
 
-from tensorflow.keras.applications import VGG16
-from tensorflow.keras.applications.vgg16 import preprocess_input
-from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Input, Dense, Embedding, LSTM
+import tensorflow as tf
+import numpy as np
+from tensorflow.keras.applications import ResNet50
+from tensorflow.keras.applications.resnet50 import preprocess_input
 from tensorflow.keras.preprocessing.text import Tokenizer
 from tensorflow.keras.preprocessing.sequence import pad_sequences
+from tensorflow.keras.layers import Input, Embedding, LSTM, Dense, RepeatVector, Concatenate
+from tensorflow.keras.models import Model
 
 # 1. Load dataset
-ds, info = tfds.load(
-    "imagenette/160px-v2",
-    split="train",
-    as_supervised=True,
-    with_info=True
+path = "imagenet_subset"
+train, test = tf.keras.utils.image_dataset_from_directory(
+    path, validation_split=0.2, subset="both", seed=1,
+    image_size=(224, 224), batch_size=4
 )
+classes = train.class_names
 
-class_names = info.features["label"].names
+# 2. CNN encoder: extract image features
+cnn = ResNet50(weights="imagenet", include_top=False, pooling="avg")
 
-# 2. Collect 20 images from first 5 classes
-images = []
-labels = []
-count = [0] * 5
+def extract(ds):
+    X, Y = [], []
+    for images, labels in ds:
+        f = cnn.predict(preprocess_input(images.numpy()), verbose=0)
+        X.extend(f)
+        Y.extend(labels.numpy())
+    return np.array(X), np.array(Y)
 
-for img, label in tfds.as_numpy(ds):
-    label = int(label)
+X_train, y_train = extract(train)
+X_test, y_test = extract(test)
 
-    if label < 5 and count[label] < 20:
-        images.append(
-            tf.image.resize(img, (224, 224)).numpy()
-        )
-        labels.append(label)
-        count[label] += 1
+# 3. Create captions from class labels
+captions = ["startseq a photo of " + c.replace("_", " ") + " endseq"
+            for c in classes]
 
-    if all(c == 20 for c in count):
-        break
-
-X = preprocess_input(np.array(images))
-
-# 3. CNN feature extractor
-cnn = VGG16(weights="imagenet", include_top=False)
-
-extractor = Model(
-    cnn.input,
-    tf.keras.layers.GlobalAveragePooling2D()(cnn.output)
-)
-
-features = extractor.predict(X, verbose=0)
-
-# 4. Create captions from class labels
-captions = [
-    "<start> a photo of a " + class_names[label] + " <end>"
-    for label in labels
-]
-
-print("Example caption:")
-print(captions[0])
-
-# 5. Tokenize captions
-tokenizer = Tokenizer()
+tokenizer = Tokenizer(filters="")
 tokenizer.fit_on_texts(captions)
+vocab = len(tokenizer.word_index) + 1
+seqs = tokenizer.texts_to_sequences(captions)
+maxlen = max(len(s) for s in seqs)
 
-sequences = tokenizer.texts_to_sequences(captions)
-max_len = max(len(s) for s in sequences)
+# 4. Prepare caption sequences for next-word prediction
+texts = ["startseq a photo of " + classes[int(y)].replace("_", " ") + " endseq"
+         for y in y_train]
+seqs = tokenizer.texts_to_sequences(texts)
 
-X_seq = pad_sequences(sequences, maxlen=max_len, padding="post")
+A, B = [], []
+for f, s in zip(X_train, seqs):
+    s = pad_sequences([s], maxlen=maxlen, padding="post")[0]
+    A.append((f, s[:-1]))
+    B.append(s[1:])
 
-# Input = words except last word
-X_words = X_seq[:, :-1]
+features = np.array([a[0] for a in A])
+words = np.array([a[1] for a in A])
+targets = tf.keras.utils.to_categorical(B, num_classes=vocab)
 
-# Target = next words
-Y_words = X_seq[:, 1:]
+# 5. CNN-LSTM decoder
+image_in = Input(shape=(2048,))
+word_in = Input(shape=(maxlen - 1,))
+img = RepeatVector(maxlen - 1)(image_in)
+txt = Embedding(vocab, 32)(word_in)
+x = Concatenate()([img, txt])
+x = LSTM(64, return_sequences=True)(x)
+out = Dense(vocab, activation="softmax")(x)
 
-vocab_size = len(tokenizer.word_index) + 1
+model = Model([image_in, word_in], out)
+model.compile(optimizer="adam", loss="categorical_crossentropy")
+model.fit([features, words], targets, epochs=30, verbose=0)
 
-# Convert target to one-hot
-Y = tf.keras.utils.to_categorical(
-    Y_words,
-    num_classes=vocab_size
-)
+# 6. Generate captions for test images
+index = {v: k for k, v in tokenizer.word_index.items()}
 
-# 6. CNN + LSTM model
-image_input = Input(shape=(512,))
-text_input = Input(shape=(max_len - 1,))
+for f, label in zip(X_test, y_test):
+    seq = [tokenizer.word_index["startseq"]]
 
-h = Dense(128, activation="tanh")(image_input)
-c = Dense(128, activation="tanh")(image_input)
+    for _ in range(maxlen - 1):
+        padded = pad_sequences([seq], maxlen=maxlen - 1, padding="post")
+        p = model.predict([f.reshape(1, -1), padded], verbose=0)
+        next_id = int(np.argmax(p[0, len(seq) - 1]))
 
-x = Embedding(
-    vocab_size,
-    128,
-    mask_zero=True
-)(text_input)
+        if next_id == 0 or index.get(next_id) == "endseq":
+            break
+        seq.append(next_id)
 
-x = LSTM(
-    128,
-    return_sequences=True
-)(x, initial_state=[h, c])
+    caption = " ".join(index.get(i, "") for i in seq[1:])
+    print("Expected:", classes[int(label)])
+    print("Generated:", caption)
 
-output = Dense(
-    vocab_size,
-    activation="softmax"
-)(x)
+# Architecture
+# Image → CNN encoder → image feature vector → LSTM decoder → words → caption
+# What is an RNN?
+# A Recurrent Neural Network is designed for sequential data. It processes one step at a time and carries information from earlier steps forward. It can be used for text, time series and other sequences.
+# What is an LSTM?
+# LSTM means Long Short-Term Memory. It is a type of RNN designed to learn longer-range dependencies using a cell state and gates.
 
-model = Model(
-    [image_input, text_input],
-    output
-)
-
-model.compile(
-    optimizer="adam",
-    loss="categorical_crossentropy"
-)
-
-# 7. Train
-model.fit(
-    [features, X_words],
-    Y,
-    epochs=10,
-    verbose=1
-)
-
-# 8. Generate a caption
-image_id = 0
-words = ["<start>"]
-
-for i in range(max_len - 1):
-
-    seq = tokenizer.texts_to_sequences(
-        [" ".join(words)]
-    )
-
-    seq = pad_sequences(
-        seq,
-        maxlen=max_len - 1,
-        padding="post"
-    )
-
-    pred = model.predict(
-        [features[image_id:image_id+1], seq],
-        verbose=0
-    )
-
-    next_word = np.argmax(pred[0, i])
-
-    if next_word == 0:
-        break
-
-    word = tokenizer.index_word.get(next_word, "")
-
-    if word == "<end>":
-        break
-
-    words.append(word)
-
-print("\nGenerated caption:")
-print(" ".join(words[1:]))
-# import numpy as np
-# import tensorflow as tf
-# from tensorflow.keras.preprocessing.text import Tokenizer
-# from tensorflow.keras.preprocessing.sequence import pad_sequences
-# from tensorflow.keras.layers import Input, Dense, Embedding, LSTM, RepeatVector, Concatenate, TimeDistributed
-# from tensorflow.keras.models import Model
-
-# X = np.load("features.npy")
-# y = np.load("labels.npy")
-
-# classes = ["goldfish", "tiger_cat", "Egyptian_cat", "tiger", "elephant"]
-
-# captions = [
-#     "<start> a photo of a " + classes[i] + " <end>"
-#     for i in y
-# ]
-
-# tok = Tokenizer()
-# tok.fit_on_texts(captions)
-
-# seq = tok.texts_to_sequences(captions)
-# m = max(map(len, seq))
-# seq = pad_sequences(seq, maxlen=m)
-
-# inp = seq[:,:-1]
-# out = seq[:,1:]
-
-# vocab = len(tok.word_index) + 1
-# n = m - 1
-
-# img = Input((X.shape[1],))
-# txt = Input((n,))
-
-# a = RepeatVector(n)(Dense(128, activation="relu")(img))
-# b = LSTM(128, return_sequences=True)(Embedding(vocab,64)(txt))
-
-# z = Concatenate()([a,b])
-# z = TimeDistributed(Dense(vocab, activation="softmax"))(z)
-
-# model = Model([img,txt],z)
-# model.compile(optimizer="adam",
-#               loss="sparse_categorical_crossentropy")
-
-# model.fit([X,inp],out,epochs=50,verbose=0)
-
-# i = 0
-# s = [tok.word_index["start"]]
-
-# for _ in range(n):
-#     p = pad_sequences([s], maxlen=n)
-#     pred = model.predict([X[i:i+1],p],verbose=0)[0,len(s)-1]
-#     word = np.argmax(pred)
-
-#     if word == tok.word_index.get("end"):
-#         break
-
-#     s.append(word)
-
-# print("Expected:", captions[i])
-# print("Generated:", " ".join(tok.index_word[w] for w in s[1:]))
+# Three gates:
+# - Forget gate: decides what old information to retain or discard.
+# - Input gate: decides what new information to store.
+# - Output gate: controls what information is exposed as the hidden state.
+# CNN encoder vs LSTM decoder
+# - CNN encoder: extracts visual information from the image.
+# - LSTM decoder: uses the image representation and preceding words to predict the next word.
+# Tokenization and vocabulary
+# - Tokenization: convert text into tokens, often words.
+# - Vocabulary: the collection of distinct tokens.
+# - Integer sequence: represent each token by an integer ID.
+# - <start> token: signals the beginning of a caption.
+# - <end> token: signals the end of a caption.
+# - Padding: make sequences the same length for batch processing.

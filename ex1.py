@@ -1,107 +1,59 @@
-# import os, random
-# import numpy as np
-# import matplotlib.pyplot as plt
-# from tensorflow.keras.applications import VGG16
-# from tensorflow.keras.applications.vgg16 import preprocess_input, decode_predictions
-# from tensorflow.keras.preprocessing import image
-# from tensorflow.keras.models import Model
-
-# model = VGG16(weights="imagenet")
-
-# path = "imagenet_subset"
-# label = random.choice(os.listdir(path))
-# file = random.choice(os.listdir(os.path.join(path, label)))
-
-# img = image.load_img(os.path.join(path, label, file), target_size=(224,224))
-# x = np.expand_dims(image.img_to_array(img), 0)
-# x = preprocess_input(x)
-
-# print("Input shape:", x.shape)
-
-# pred = model.predict(x, verbose=0)
-# top5 = decode_predictions(pred, top=5)[0]
-
-# print("Original label:", label)
-# print("\nTop-5 predictions:")
-# for i, (_, name, p) in enumerate(top5):
-#     print(i+1, name, round(p*100,2), "%")
-
-# print("Predicted label:", top5[0][1])
-
-# feature_model = Model(model.input,
-#                       model.get_layer("block5_conv3").output)
-# features = feature_model.predict(x, verbose=0)
-
-# print("Intermediate shape:", features.shape)
-
-# plt.imshow(img)
-# plt.title(label)
-# plt.axis("off")
-# plt.show()
-
-# plt.imshow(features[0,:,:,0], cmap="gray")
-# plt.title("Intermediate Feature Map")
-# plt.axis("off")
-# plt.show()
 import tensorflow as tf
-import tensorflow_datasets as tfds
 import numpy as np
 import matplotlib.pyplot as plt
-
-from tensorflow.keras.applications import VGG16
-from tensorflow.keras.applications.vgg16 import preprocess_input, decode_predictions
+from tensorflow.keras.applications import ResNet50
+from tensorflow.keras.applications.resnet50 import preprocess_input, decode_predictions
 from tensorflow.keras.models import Model
 
-# 1. Load dataset automatically
-ds, info = tfds.load(
-    "imagenette/160px-v2",
-    split="train",
-    as_supervised=True,
-    with_info=True
+# 1. Load dataset and split it
+path = "path/to/imagenet_subset"
+
+train_ds, test_ds = tf.keras.utils.image_dataset_from_directory(
+    path, validation_split=0.2, subset="both",
+    seed=1, image_size=(224, 224), batch_size=1
 )
 
-class_names = info.features["label"].names
+# 2. Load pre-trained CNN
+model = ResNet50(weights="imagenet")
 
-# 2. Take one image
-img, label = next(iter(ds))
+# 3. Get one test image and its original label
+x, y = next(iter(test_ds))
+original_label = test_ds.class_names[int(y[0])]
 
-print("Original label:", class_names[label.numpy()])
-print("Original shape:", img.shape)
+print("Original image shape:", x.shape)
+print("Original label:", original_label)
 
-# 3. Resize
-img = tf.image.resize(img, (224, 224))
+# 4. Preprocess image
+img = preprocess_input(x.numpy().copy())
+print("Preprocessed shape:", img.shape)
 
-# 4. Convert to array and preprocess
-x = np.expand_dims(img.numpy(), axis=0)
-x = preprocess_input(x)
-
-print("Preprocessed shape:", x.shape)
-
-# 5. Display image
-plt.imshow(img.numpy().astype("uint8"))
-plt.title("Original: " + class_names[label.numpy()])
-plt.axis("off")
-plt.show()
-
-# 6. Load pretrained VGG16
-model = VGG16(weights="imagenet")
-
-# 7. Predict
-pred = model.predict(x, verbose=0)
-
-# 8. Top-5 predictions
+# 5. Predict top-5 classes
+pred = model.predict(img, verbose=0)
 top5 = decode_predictions(pred, top=5)[0]
 
-print("\nTop-5 predictions:")
-for _, name, probability in top5:
-    print(name, ":", round(probability * 100, 2), "%")
+for _, label, score in top5:
+    print(label, ":", round(float(score) * 100, 2), "%")
 
-# 9. Intermediate representation
+print("Top-1 prediction:", top5[0][1])
+print("Label comparison:", original_label, "vs", top5[0][1])
+
+# 6. Extract an intermediate feature map
 feature_model = Model(
-    model.input,
-    model.get_layer("block5_conv3").output
+    inputs=model.input,
+    outputs=model.get_layer("conv1_relu").output
 )
+features = feature_model.predict(img, verbose=0)
+print("Feature map shape:", features.shape)
 
-features = feature_model.predict(x, verbose=0)
+# 7. Visualize image and feature map
+plt.figure(figsize=(8, 4))
+plt.subplot(1, 2, 1)
+plt.imshow(x[0].numpy().astype("uint8"))
+plt.title("Original: " + original_label)
+plt.axis("off")
 
-print("\nIntermediate feature shape:", features.shape)
+plt.subplot(1, 2, 2)
+plt.imshow(features[0, :, :, 0], cmap="viridis")
+plt.title("CNN Feature Map")
+plt.axis("off")
+plt.show()
